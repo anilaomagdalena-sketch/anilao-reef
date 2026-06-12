@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>アニラオの海 — Interactive Reef</title>
+<style>
+  :root{
+    --ink:#eaf6f6;
+    --dim:#9fc4cc;
+    --accent:#ffb3c7;
+    --panel:rgba(4,22,34,.55);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#03101c;
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif;
+    -webkit-user-select:none;user-select:none}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none}
+  .hud{position:fixed;top:14px;left:14px;color:var(--ink);
+    background:var(--panel);backdrop-filter:blur(8px);
+    border:1px solid rgba(159,196,204,.25);border-radius:14px;
+    padding:12px 16px;line-height:1.5;max-width:240px}
+  .hud h1{font-size:14px;font-weight:700;letter-spacing:.12em;margin-bottom:2px}
+  .hud .sub{font-size:11px;color:var(--dim);letter-spacing:.06em}
+  .gauges{display:flex;gap:14px;margin-top:8px;font-variant-numeric:tabular-nums}
+  .gauge .v{font-size:18px;font-weight:700}
+  .gauge .l{font-size:10px;color:var(--dim);letter-spacing:.1em}
+  .btns{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+    display:flex;gap:10px}
+  button{appearance:none;border:1px solid rgba(159,196,204,.35);
+    background:var(--panel);backdrop-filter:blur(8px);color:var(--ink);
+    border-radius:999px;padding:10px 18px;font-size:13px;font-weight:600;
+    letter-spacing:.05em;cursor:pointer;transition:transform .15s,background .2s;
+    font-family:inherit}
+  button:hover{transform:translateY(-2px);background:rgba(20,60,80,.6)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button.spawn{border-color:rgba(255,179,199,.5);color:var(--accent)}
+  button.spawn.active{background:rgba(120,30,60,.5)}
+  .hint{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);
+    color:var(--dim);font-size:11px;letter-spacing:.08em;text-align:center;
+    pointer-events:none;transition:opacity 1s}
+  @media (prefers-reduced-motion:reduce){ .hint{transition:none} }
+</style>
+</head>
+<body>
+<canvas id="sea"></canvas>
+
+<div class="hud">
+  <h1>アニラオの海</h1>
+  <div class="sub">INTERACTIVE REEF SIMULATION</div>
+  <div class="gauges">
+    <div class="gauge"><div class="v" id="depth">12.4<span style="font-size:11px">m</span></div><div class="l">DEPTH</div></div>
+    <div class="gauge"><div class="v" id="temp">28<span style="font-size:11px">°C</span></div><div class="l">WATER</div></div>
+    <div class="gauge"><div class="v" id="fishN">—</div><div class="l">FISH</div></div>
+  </div>
+</div>
+
+<div class="hint" id="hint">タップ／クリックで魚が逃げます · 指を追いかける群れも</div>
+
+<div class="btns">
+  <button id="modeBtn">🌙 ナイトダイブ</button>
+  <button id="spawnBtn" class="spawn">🪸 サンゴの産卵</button>
+</div>
+
+<script>
+const cv = document.getElementById('sea');
+const cx = cv.getContext('2d');
+let W, H, DPR;
+function resize(){
+  DPR = Math.min(devicePixelRatio||1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  cx.setTransform(DPR,0,0,DPR,0,0);
+}
+resize(); addEventListener('resize', resize);
+
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------- state ----------
+let night = false;
+let spawning = false;
+let t = 0;
+const pointer = {x:-999, y:-999, down:false, downT:0};
+
+// ---------- fish (boids) ----------
+const PALETTES = [
+  ['#ffb45e','#ff8c42'],   // anthias orange
+  ['#7fd8ff','#3aa8e0'],   // fusilier blue
+  ['#ffe066','#f4b942'],   // butterfly yellow
+  ['#c8f0e8','#7fc8b8'],   // silver-green
+];
+const fishes = [];
+const NF = Math.min(110, Math.floor(innerWidth*innerHeight/9000));
+for(let i=0;i<NF;i++){
+  const pal = PALETTES[Math.floor(Math.random()*PALETTES.length)];
+  fishes.push({
+    x:Math.random()*innerWidth, y:Math.random()*innerHeight*.85+30,
+    vx:(Math.random()-.5)*2, vy:(Math.random()-.5)*2,
+    s: 3.5+Math.random()*3.5, c:pal,
+    grp: Math.floor(Math.random()*PALETTES.length),
+    wob: Math.random()*Math.PI*2
+  });
+}
+document.getElementById('fishN').textContent = NF;
+
+function stepFish(f, i){
+  let ax=0, ay=0, n=0, cxm=0, cym=0, sx=0, sy=0;
+  for(let j=0;j<fishes.length;j+=2){
+    if(j===i) continue;
+    const o = fishes[j];
+    const dx=o.x-f.x, dy=o.y-f.y, d2=dx*dx+dy*dy;
+    if(d2<9000 && o.grp===f.grp){
+      cxm+=o.x; cym+=o.y; ax+=o.vx; ay+=o.vy; n++;
+      if(d2<700){ sx-=dx; sy-=dy; }
+    }
+  }
+  if(n){
+    f.vx += ((cxm/n - f.x)*0.0009) + ((ax/n - f.vx)*0.04) + sx*0.015;
+    f.vy += ((cym/n - f.y)*0.0009) + ((ay/n - f.vy)*0.04) + sy*0.015;
+  }
+  // pointer: flee on tap, gentle curiosity when held
+  const dx=f.x-pointer.x, dy=f.y-pointer.y, d2=dx*dx+dy*dy;
+  if(pointer.down && performance.now()-pointer.downT<350 && d2<36000){
+    const d=Math.sqrt(d2)+1;
+    f.vx += dx/d*2.4; f.vy += dy/d*2.4;
+  } else if(pointer.down && d2<90000 && d2>4000){
+    const d=Math.sqrt(d2)+1;
+    f.vx -= dx/d*0.12; f.vy -= dy/d*0.12;
+  }
+  // bounds
+  const m=40;
+  if(f.x<m) f.vx+=0.12; if(f.x>W-m) f.vx-=0.12;
+  if(f.y<m+20) f.vy+=0.12; if(f.y>H-m-60) f.vy-=0.12;
+  // drift current
+  f.vx += Math.sin(t*0.0004 + f.y*0.01)*0.012;
+  // speed clamp
+  const sp = Math.hypot(f.vx,f.vy);
+  const max = 2.3, min=0.6;
+  if(sp>max){ f.vx=f.vx/sp*max; f.vy=f.vy/sp*max; }
+  if(sp<min){ f.vx=f.vx/(sp||1)*min; f.vy=f.vy/(sp||1)*min; }
+  f.x+=f.vx; f.y+=f.vy; f.wob+=0.25;
+}
+
+function drawFish(f){
+  const a = Math.atan2(f.vy,f.vx);
+  const flick = Math.sin(f.wob)*f.s*0.45;
+  cx.save();
+  cx.translate(f.x,f.y); cx.rotate(a);
+  let alpha = 1;
+  if(night){
+    const d = Math.hypot(f.x-pointer.x, f.y-pointer.y);
+    alpha = Math.max(0.06, 1 - d/260);
+  }
+  cx.globalAlpha = alpha;
+  // body
+  cx.fillStyle = f.c[0];
+  cx.beginPath();
+  cx.moveTo(f.s*1.6,0);
+  cx.quadraticCurveTo(0,-f.s, -f.s*1.4, 0);
+  cx.quadraticCurveTo(0, f.s,  f.s*1.6, 0);
+  cx.fill();
+  // tail
+  cx.fillStyle = f.c[1];
+  cx.beginPath();
+  cx.moveTo(-f.s*1.2,0);
+  cx.lineTo(-f.s*2.2, -f.s*0.8 + flick);
+  cx.lineTo(-f.s*2.2,  f.s*0.8 + flick);
+  cx.closePath(); cx.fill();
+  cx.restore();
+  cx.globalAlpha = 1;
+}
+
+// ---------- bubbles ----------
+const bubbles = [];
+function emitBubble(x,y){
+  bubbles.push({x, y, r:1+Math.random()*3, vy:-(0.6+Math.random()*1.2), wob:Math.random()*6});
+}
+setInterval(()=>{ if(!reduceMotion) emitBubble(Math.random()*W, H+10); }, 600);
+
+// ---------- coral spawning ----------
+const eggs = [];
+function emitEggs(){
+  for(let k=0;k<3;k++){
+    const bx = corals[Math.floor(Math.random()*corals.length)];
+    eggs.push({
+      x: bx.x + (Math.random()-.5)*bx.w*0.8,
+      y: H - bx.h*Math.random()*0.6 - 10,
+      vy: -(0.25+Math.random()*0.5),
+      vx: (Math.random()-.5)*0.3,
+      r: 1.5+Math.random()*2,
+      hue: 335+Math.random()*20,
+      tw: Math.random()*Math.PI*2
+    });
+  }
+}
+
+// ---------- reef silhouette ----------
+const corals = [];
+(function(){
+  let x = 0;
+  while(x < 4000){
+    const w = 60+Math.random()*140;
+    corals.push({x:x+w/2, w, h:40+Math.random()*120, type:Math.floor(Math.random()*3)});
+    x += w*0.7;
+  }
+})();
+
+function drawReef(){
+  const base = night ? '#02060c' : '#062436';
+  cx.fillStyle = base;
+  for(const c of corals){
+    if(c.x < -200 || c.x > W+200) continue;
+    cx.beginPath();
+    if(c.type===0){ // mound
+      cx.ellipse(c.x, H, c.w/2, c.h, 0, Math.PI, 0);
+    } else if(c.type===1){ // branching
+      cx.moveTo(c.x-c.w/2, H);
+      for(let i=0;i<=6;i++){
+        const px = c.x - c.w/2 + c.w*i/6;
+        const py = H - c.h*(0.4+0.6*Math.abs(Math.sin(i*2.1+c.x)));
+        cx.lineTo(px,py);
+      }
+      cx.lineTo(c.x+c.w/2, H);
+    } else { // table
+      cx.moveTo(c.x-c.w/2,H); cx.lineTo(c.x-c.w*0.1,H-c.h);
+      cx.lineTo(c.x+c.w*0.1,H-c.h); cx.lineTo(c.x+c.w/2,H);
+    }
+    cx.closePath(); cx.fill();
+  }
+}
+
+// ---------- render ----------
+function bg(){
+  const g = cx.createLinearGradient(0,0,0,H);
+  if(night){
+    g.addColorStop(0,'#03101e'); g.addColorStop(1,'#010409');
+  } else {
+    g.addColorStop(0,'#0e6f8f'); g.addColorStop(.5,'#0a4a68'); g.addColorStop(1,'#062a42');
+  }
+  cx.fillStyle = g; cx.fillRect(0,0,W,H);
+}
+
+function godRays(){
+  if(night || reduceMotion) return;
+  cx.save();
+  cx.globalCompositeOperation='lighter';
+  for(let i=0;i<5;i++){
+    const bx = (i/5)*W + Math.sin(t*0.0003+i*2)*60;
+    const wTop = 30+i*10, wBot = 160+i*30;
+    const g = cx.createLinearGradient(0,0,0,H*0.9);
+    g.addColorStop(0,'rgba(180,235,255,0.10)');
+    g.addColorStop(1,'rgba(180,235,255,0)');
+    cx.fillStyle=g;
+    cx.beginPath();
+    cx.moveTo(bx-wTop,0); cx.lineTo(bx+wTop,0);
+    cx.lineTo(bx+wBot+80, H*0.9); cx.lineTo(bx-wBot+80, H*0.9);
+    cx.closePath(); cx.fill();
+  }
+  cx.restore();
+}
+
+function torch(){
+  if(!night || pointer.x<0) return;
+  cx.save();
+  cx.globalCompositeOperation='lighter';
+  const g = cx.createRadialGradient(pointer.x,pointer.y,10, pointer.x,pointer.y,260);
+  g.addColorStop(0,'rgba(200,240,255,0.30)');
+  g.addColorStop(0.5,'rgba(120,200,230,0.10)');
+  g.addColorStop(1,'rgba(0,0,0,0)');
+  cx.fillStyle=g;
+  cx.beginPath(); cx.arc(pointer.x,pointer.y,260,0,7); cx.fill();
+  cx.restore();
+}
+
+function loop(now){
+  t = now;
+  bg(); godRays(); drawReef();
+
+  // eggs
+  if(spawning && Math.random()<0.6) emitEggs();
+  for(let i=eggs.length-1;i>=0;i--){
+    const e = eggs[i];
+    e.y += e.vy; e.x += e.vx + Math.sin(t*0.001+e.tw)*0.2; e.tw+=0.02;
+    if(e.y < -10){ eggs.splice(i,1); continue; }
+    const tw = 0.6+0.4*Math.sin(t*0.004+e.tw*3);
+    cx.fillStyle = `hsla(${e.hue},85%,75%,${tw})`;
+    cx.beginPath(); cx.arc(e.x,e.y,e.r,0,7); cx.fill();
+    if(night){
+      cx.fillStyle = `hsla(${e.hue},90%,80%,${tw*0.15})`;
+      cx.beginPath(); cx.arc(e.x,e.y,e.r*4,0,7); cx.fill();
+    }
+  }
+
+  // fish
+  for(let i=0;i<fishes.length;i++){ stepFish(fishes[i],i); drawFish(fishes[i]); }
+
+  // bubbles
+  for(let i=bubbles.length-1;i>=0;i--){
+    const b=bubbles[i];
+    b.y+=b.vy; b.x+=Math.sin(t*0.002+b.wob)*0.5; b.r+=0.004;
+    if(b.y<-10){ bubbles.splice(i,1); continue; }
+    cx.strokeStyle = night?'rgba(150,200,220,0.25)':'rgba(220,245,255,0.45)';
+    cx.lineWidth=1;
+    cx.beginPath(); cx.arc(b.x,b.y,b.r,0,7); cx.stroke();
+  }
+
+  torch();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// depth gauge drifts gently
+setInterval(()=>{
+  const d = 12.4 + Math.sin(Date.now()/9000)*1.8;
+  document.getElementById('depth').innerHTML = d.toFixed(1)+'<span style="font-size:11px">m</span>';
+},800);
+
+// ---------- input ----------
+function setPtr(e){
+  const p = e.touches ? e.touches[0] : e;
+  pointer.x = p.clientX; pointer.y = p.clientY;
+}
+addEventListener('pointermove', setPtr);
+addEventListener('pointerdown', e=>{
+  setPtr(e); pointer.down=true; pointer.downT=performance.now();
+  for(let k=0;k<5;k++) emitBubble(pointer.x+(Math.random()-.5)*20, pointer.y);
+  const h=document.getElementById('hint'); if(h) h.style.opacity=0;
+});
+addEventListener('pointerup', ()=>{ pointer.down=false; });
+addEventListener('pointercancel', ()=>{ pointer.down=false; });
+
+// ---------- buttons ----------
+const modeBtn = document.getElementById('modeBtn');
+modeBtn.addEventListener('click', ()=>{
+  night = !night;
+  modeBtn.textContent = night ? '☀️ デイダイブ' : '🌙 ナイトダイブ';
+  document.getElementById('temp').innerHTML = (night?27:28)+'<span style="font-size:11px">°C</span>';
+});
+const spawnBtn = document.getElementById('spawnBtn');
+spawnBtn.addEventListener('click', ()=>{
+  spawning = !spawning;
+  spawnBtn.classList.toggle('active', spawning);
+  spawnBtn.textContent = spawning ? '🪸 産卵中…' : '🪸 サンゴの産卵';
+});
+</script>
+</body>
+</html>
